@@ -186,6 +186,7 @@
 
 - name: has the lifecycle already been configured for the capsule?
   delegate_to: "{{ sat_server }}"
+  ignore_errors: True
   shell: "hammer capsule content lifecycle-environments --name {{ cap_server }} | grep -v - | grep -v ID"
   register: caplifecycle
 
