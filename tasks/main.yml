@@ -1,0 +1,212 @@
+#- name: install requisite packages {{ packages }}
+#  yum:
+#    state: latest
+#    name: "{{ item }}"
+#  loop: "{{ packages }}"
+
+- name: configure firewalld
+  firewalld:
+    state: enabled
+    permanent: yes
+    immediate: yes
+    port: "{{ item }}"
+  loop: "{{ cap_ports }}"
+#  - "{{ cap_optional_ports }}"
+
+- name: is client already registered with idm?
+  register: ipa_client_configured
+  stat:
+    path: /etc/ipa/default.conf
+
+- name: register client to idm
+  command: >
+    ipa-client-install
+      --principal={{  idm_enroll_user  }}
+      --password={{ idm_enroll_password }}
+      --realm={{ idm_realm }}
+      --domain={{ idm_domain }}
+      --ssh-trust-dns
+      --mkhomedir
+      --force-join
+      --unattended
+      --no-ntp
+  when: not ipa_client_configured.stat.exists
+
+
+- name: is the katello-ca rpm already installed?     
+  shell: rpm -qa | grep katello-ca | cut -d'-' -f4     
+  register: katelloregvar   
+
+- name: remove katello-ca when pointing to old sat or cap server     
+  yum:       
+    name: "katello-ca*"       
+    state: absent       
+    disable_gpg_check: yes       
+    validate_certs: no     
+  when: 'sat_server not in katelloregvar.stdout'
+
+- name: install the katello-ca-consumer-latest.noarch.rpm
+  yum:
+    name: "https://{{ sat_server }}/pub/katello-ca-consumer-latest.noarch.rpm"
+    state: present
+    disable_gpg_check: yes
+    validate_certs: no
+
+- name: connect {{ activation_key }} to machine
+  redhat_subscription:
+    state: present
+    activationkey: "{{ activation_key }}"
+    org_id: "VMC"
+  register: akvar
+  ignore_errors: true
+
+- name: have the repos already been configured? 
+  shell: subscription-manager repos --list-enabled | grep capsule
+  failed_when: "'ERROR' in caprepos.stderr"
+  register: caprepos
+
+- name: disable all repos
+  shell: "subscription-manager repos --disable '*'"
+  when: caprepos.stdout == '' 
+
+- name: enable repos
+  shell: "subscription-manager repos --enable {{ item }}"
+  loop: "{{ cap_repos }}"
+  when: caprepos.stdout == '' 
+
+- name: yum clean
+  shell: yum clean all
+ 
+- name: yum update all
+  yum:
+    state: latest
+    name: "*"
+    disable_gpg_check: yes
+    validate_certs: no
+  register: yumupdates
+
+- name: reboot the {{ cap_server }}
+  reboot:  
+  when: yumupdates.changed
+
+- name: install {{ cap_packages }} on {{ cap_server }}
+  yum:
+    name: "{{ item }}"
+    state: latest
+    disable_gpg_check: yes
+    validate_certs: no
+  loop: "{{ cap_packages }}"
+
+- name: ensure basedir {{ cap_cert_dir }} exists on {{ sat_server }}
+  delegate_to: "{{ sat_server }}"
+  file:
+    path: "{{ cap_cert_dir }}"
+    state: directory
+    mode: 0755
+
+- name: has the cert already been generated?
+  delegate_to: "{{ sat_server }}"
+  stat: 
+    path: "{{ cap_cert_dir }}/{{ cap_server }}.tar"
+  ignore_errors: true
+  register: capcert
+
+- name: generate the cert for the capsule server
+  delegate_to: "{{ sat_server }}"
+  shell: "capsule-certs-generate --foreman-proxy-fqdn {{ cap_server }} --certs-tar {{ cap_server }}.tar"
+  register: capsuledata
+  args:
+    chdir: "{{ cap_cert_dir }}"
+  when: capcert.stat.exists == False
+
+- name: ensure basedir {{ cap_cert_dir }} exists on {{ cap_server }}
+  file:
+    path: "{{ cap_cert_dir }}"
+    state: directory
+    mode: 0755
+
+- name: has the cert already been copied to the {{ cap_server }}?
+  stat: 
+    path: "{{ cap_cert_dir }}/{{ cap_server }}.tar"
+  ignore_errors: true
+  register: capcertlocal
+
+- name: pull the cert from the {{ sat_server }} to the local machine
+  delegate_to: "{{ sat_server }}"
+  fetch:
+    src: "{{ cap_cert_dir }}/{{ cap_server }}.tar"
+    dest: /tmp/
+  when: capcertlocal.stat.exists == False
+
+- name: push cert to {{ cap_server }}
+  copy:
+    src: "/tmp/{{ cap_server }}{{ cap_cert_dir }}/{{ cap_server }}.tar"
+    dest: "{{ cap_cert_dir }}/{{ cap_server }}.tar"
+  when: capcertlocal.stat.exists == False
+
+- name: obtain the foreman-proxy-oauth-consumer-key
+  delegate_to: "{{ sat_server }}"
+  shell: "grep consumer_key /etc/foreman/settings.yaml | awk '{print $2}'"
+  register: consumerkey
+
+- name: obtain the foreman-proxy-oauth-consumer-secret
+  delegate_to: "{{ sat_server }}"
+  shell: "grep consumer_secret /etc/foreman/settings.yaml | awk '{print $2}'"
+  register: consumersecret
+
+- name: configure the capsule server
+  shell: "satellite-installer --scenario capsule --foreman-proxy-content-parent-fqdn {{ sat_server }} --foreman-proxy-register-in-foreman true --foreman-proxy-foreman-base-url https://{{ sat_server }} --foreman-proxy-trusted-hosts {{ sat_server }} --foreman-proxy-trusted-hosts {{ cap_server }} --foreman-proxy-oauth-consumer-key {{ consumerkey.stdout }} --foreman-proxy-oauth-consumer-secret {{ consumersecret.stdout }} --foreman-proxy-content-certs-tar {{ cap_cert_dir }}/{{ cap_server }}.tar --puppet-server-foreman-url https://{{ sat_server }}"
+
+- name: enable remote execution
+  shell: "satellite-installer --scenario capsule --enable-foreman-proxy-plugin-remote-execution-ssh"
+  
+- name: has {{ cap_server }} already been added as a smart proxy
+  delegate_to: "{{ sat_server }}"
+  shell: "hammer --output json capsule info --name {{ cap_server }} | grep {{ org }}"
+  ignore_errors: True
+  register: capsmartproxy
+
+- name: add smart proxy to org
+  delegate_to: "{{ sat_server }}"
+  shell: "hammer organization add-smart-proxy --name {{ org }} --smart-proxy {{ cap_server }}"
+  ignore_errors: True
+  when: capsmartproxy.stdout == ""
+
+- name: has the smart proxy already been added to the location?
+  delegate_to: "{{ sat_server }}"
+  shell: "hammer --output json capsule info --name {{ cap_server }} | grep {{ subdomain | upper }}"
+  ignore_errors: True
+  register: smartproxyloc
+
+- name: add smart proxy to location
+  delegate_to: "{{ sat_server }}"
+  shell: "hammer capsule update --locations {{ subdomain | upper }} --name {{ cap_server }}"
+  ignore_errors: True
+  when: smartproxyloc.stdout == ""
+
+- name: has the lifecycle already been configured for the capsule?
+  delegate_to: "{{ sat_server }}"
+  shell: "hammer --output json capsule content lifecycle-environments --name {{ cap_server }}"
+  register: caplifecycle
+
+- name: assign lifecycles to capsule
+  delegate_to: "{{ sat_server }}"
+  ignore_errors: True
+  shell: "hammer capsule content add-lifecycle-environment --environment {{ subdomain | upper }} --name {{ cap_server }} --organization {{ org }}"
+  when: caplifecycle.stdout == ""
+
+- name: get the capsule id from {{ sat_server }}
+  delegate_to: "{{ sat_server }}"
+  shell: "hammer capsule list | grep {{ cap_server }} | awk '{print $1}'"
+  register: capid
+
+- name: get the synchronization status
+  delegate_to: "{{ sat_server }}"
+  shell: "hammer capsule content synchronization-status --id {{ capid.stdout }} | grep 'Currently running'"
+  register: capsyncstatus
+
+- name: synchronize capsule
+  delegate_to: "{{ sat_server }}"
+  ignore_errors: True
+  shell: "hammer capsule content synchronize --async --name {{ cap_server }}"
+  when: capsyncstatus.stdout == ""
