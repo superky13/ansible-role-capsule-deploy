@@ -210,4 +210,4 @@
   delegate_to: "{{ sat_server }}"
   ignore_errors: True
   shell: "hammer capsule content synchronize --async --name {{ cap_server }}"
-  when: not capsyncstatus.stdout | search("synchronized") 
+  when: not capsyncstatus.stdout is search("synchronized") 
