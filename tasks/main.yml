@@ -186,7 +186,7 @@
 
 - name: has the lifecycle already been configured for the capsule?
   delegate_to: "{{ sat_server }}"
-  shell: "hammer --output json capsule content lifecycle-environments --name {{ cap_server }}"
+  shell: "hammer --output json capsule content lifecycle-environments --name {{ cap_server }} | grep -v - | grep -v ID"
   register: caplifecycle
 
 - name: assign lifecycles to capsule
@@ -202,7 +202,7 @@
 
 - name: get the synchronization status
   delegate_to: "{{ sat_server }}"
-  shell: "hammer capsule content synchronization-status --id {{ capid.stdout }} | grep 'Currently running'"
+  shell: "hammer capsule content synchronization-status --id {{ capid.stdout }} | grep 'Status' | cut -d':' -f2"
   register: capsyncstatus
 
 - name: synchronize capsule
