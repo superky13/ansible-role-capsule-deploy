@@ -162,7 +162,7 @@
   
 - name: has {{ cap_server }} already been added as a smart proxy
   delegate_to: "{{ sat_server }}"
-  shell: "hammer --output json capsule info --name {{ cap_server }} | grep {{ org }}"
+  shell: "hammer capsule info --name {{ cap_server }} | grep {{ org }}"
   ignore_errors: True
   register: capsmartproxy
 
@@ -174,7 +174,7 @@
 
 - name: has the smart proxy already been added to the location?
   delegate_to: "{{ sat_server }}"
-  shell: "hammer --output json capsule info --name {{ cap_server }} | grep {{ subdomain | upper }}"
+  shell: "hammer capsule info --name {{ cap_server }} | grep {{ subdomain | upper }}"
   ignore_errors: True
   register: smartproxyloc
 
@@ -186,7 +186,7 @@
 
 - name: has the lifecycle already been configured for the capsule?
   delegate_to: "{{ sat_server }}"
-  shell: "hammer --output json capsule content lifecycle-environments --name {{ cap_server }} | grep -v - | grep -v ID"
+  shell: "hammer capsule content lifecycle-environments --name {{ cap_server }} | grep -v - | grep -v ID"
   register: caplifecycle
 
 - name: assign lifecycles to capsule
@@ -209,4 +209,4 @@
   delegate_to: "{{ sat_server }}"
   ignore_errors: True
   shell: "hammer capsule content synchronize --async --name {{ cap_server }}"
-  when: capsyncstatus.stdout == ""
+  when: not capsyncstatus.stdout | search("synchronized") 
